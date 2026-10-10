@@ -108,9 +108,30 @@ cp .env.example .env
 ```
 Populate your credentials in `.env`:
 ```env
-OPENAI_API_KEY=your_openai_api_key_here
-MODEL_NAME=gpt-4o-mini
+OPENAI_API_KEY=gsk_your_groq_api_key_here
+OPENAI_BASE_URL=https://api.groq.com/openai/v1
+MODEL_NAME=llama-3.3-70b-versatile
 ```
+
+---
+
+## Model & Provider Configuration
+
+The Daily Routine Concierge is pre-configured to use **Groq** for high-speed, cost-free local development and evaluation:
+
+- **Default Provider**: **Groq** (free tier, ultra-low latency, zero billing setup required)
+- **Default Model**: `llama-3.3-70b-versatile`
+- **Base URL**: `https://api.groq.com/openai/v1`
+
+### OpenAI-Compatible Flexibility
+Because the execution engine utilizes standard OpenAI-compatible wire formats and tool-calling specs, you can easily point the agent to any compatible LLM endpoint (Groq, OpenAI, Together AI, vLLM, or local Ollama) by updating your `.env` variables:
+
+| Provider | `OPENAI_BASE_URL` | Example `MODEL_NAME` | Notes |
+| :--- | :--- | :--- | :--- |
+| **Groq (Default)** | `https://api.groq.com/openai/v1` | `llama-3.3-70b-versatile` | Ultra-fast inference, free tier |
+| **OpenAI** | `https://api.openai.com/v1` | `gpt-4o-mini` / `gpt-4o` | Commercial OpenAI API |
+| **Ollama (Local)** | `http://localhost:11434/v1` | `llama3.3` / `qwen2.5` | 100% offline & local |
+| **Together AI** | `https://api.together.xyz/v1` | `meta-llama/Llama-3.3-70B-Instruct-Turbo` | Cloud open-source inference |
 
 ---
 

@@ -1,4 +1,4 @@
-"""Agent configuration, system prompt definition, and tool registry for the Concierge agent."""
+    """Agent configuration, system prompt definition, and tool registry for the Concierge agent."""
 
 from __future__ import annotations
 
@@ -124,7 +124,7 @@ class AgentConfig:
     """Unified configuration contract for the Daily Routine & Task Concierge agent."""
 
     system_prompt: str = SYSTEM_PROMPT
-    model_name: str = "gemini-2.5-pro"
+    model_name: str = "llama-3.3-70b-versatile"
     temperature: float = 0.1
     max_tokens: int = 2048
     tool_choice: str = "auto"
