@@ -1,0 +1,28 @@
+# Environment variables and sensitive credentials
+.env
+*.env
+.env.*
+!.env.example
+
+# Python virtual environments & bytecode
+venv/
+.venv/
+ENV/
+env/
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Runtime databases & state outputs
+*.sqlite3
+*.sqlite
+*.db
+daily_schedules/
+
+# Runtime data & schedule JSON files (preserves schema definition files)
+*.json
+!*schema*.json
+
+# Operating system files
+.DS_Store
+Thumbs.db
