@@ -7,6 +7,7 @@ handles recursive observations, and enforces circuit-breaker safety bounds.
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional, Protocol
@@ -62,11 +63,13 @@ class ConciergeRunner:
         session_store: Optional[SQLiteSessionStore] = None,
         session_id: Optional[str] = None,
         max_iterations: int = 5,
+        verbose: bool = False,
     ) -> None:
         self.config = config or AgentConfig.create_default()
         self.llm_client = llm_client
         self.session_store = session_store
         self.max_iterations = max_iterations
+        self.verbose = verbose or os.getenv("CONCIERGE_DEBUG", "0").lower() in ("1", "true", "yes")
 
         # 1. State initialization and session restoration
         if state:
@@ -152,7 +155,7 @@ class ConciergeRunner:
                 lines = response.content.split("\n", 1)
                 thought_text = lines[0].replace("Thought:", "").strip()
 
-            if thought_text:
+            if thought_text and self.verbose:
                 print(f"[THOUGHT] {thought_text}")
 
             # 4. Handle Terminal Assistant Message (No Tool Calls)
