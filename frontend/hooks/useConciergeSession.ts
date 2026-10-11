@@ -9,6 +9,7 @@ import {
   getSchedule,
   approveSchedule,
   rollbackSchedule,
+  getApiBase,
 } from "@/lib/api";
 import { ChatMessageItem } from "@/components/chat/ChatPane";
 import { useToast } from "@/components/ui/toast";
@@ -29,6 +30,8 @@ export interface UseConciergeSessionReturn {
   rollback: (versionId: number) => Promise<void>;
   resetSession: () => void;
   refreshSchedule: () => Promise<void>;
+  targetDate: string;
+  setTargetDate: (date: string) => void;
 }
 
 export function useConciergeSession(): UseConciergeSessionReturn {
@@ -42,6 +45,19 @@ export function useConciergeSession(): UseConciergeSessionReturn {
   const [isApproving, setIsApproving] = useState<boolean>(false);
   const [isRollingBack, setIsRollingBack] = useState<boolean>(false);
   const [backendOnline, setBackendOnline] = useState<boolean | null>(null);
+  const [targetDate, setTargetDateState] = useState<string>("");
+
+  useEffect(() => {
+    setTargetDateState(new Date().toISOString().split("T")[0]);
+  }, []);
+
+  const setTargetDate = useCallback((newDate: string) => {
+    setTargetDateState(newDate);
+    if (typeof window !== "undefined") {
+      localStorage.setItem("concierge_target_date", newDate);
+    }
+    setSchedule((prev) => (prev ? { ...prev, date: newDate } : null));
+  }, []);
 
   const toast = useToast();
   const isInitialized = useRef(false);
@@ -130,6 +146,10 @@ export function useConciergeSession(): UseConciergeSessionReturn {
           thought: res.thought,
           timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
           isNew: true,
+          actionChips: res.action_chips || [],
+          requiresDateSelection: res.requires_date_selection || res.ui_action === "show_date_time_picker" || false,
+          uiAction: res.ui_action || null,
+          defaultTask: res.default_task || null,
         };
 
         setMessages((prev) => [...prev, assistantMsg]);
@@ -138,6 +158,9 @@ export function useConciergeSession(): UseConciergeSessionReturn {
 
         if (res.schedule) {
           setSchedule(res.schedule);
+          if (res.schedule.date) {
+            setTargetDateState(res.schedule.date);
+          }
         }
 
         // Pull full audit trail snapshots
@@ -162,14 +185,14 @@ export function useConciergeSession(): UseConciergeSessionReturn {
           {
             id: `error-${Date.now()}`,
             role: "assistant",
-            content: `⚠️ Error: ${errorMsg}\n\nPlease verify that the FastAPI server is running with 'python api.py' on port 8000.`,
+            content: `⚠️ Error: ${errorMsg}\n\nPlease verify that the FastAPI server is running with 'python -m uvicorn api:app --reload' on port 8000 or 8001.`,
             timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
           },
         ]);
 
         toast.error(
           "API Connection Error",
-          "Ensure FastAPI backend is running on http://localhost:8000."
+          `Ensure FastAPI backend is running on ${getApiBase()} or port 8000/8001.`
         );
         setBackendOnline(false);
       } finally {

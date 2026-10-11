@@ -19,10 +19,25 @@ __pycache__/
 *.db
 daily_schedules/
 
-# Runtime data & schedule JSON files (preserves schema definition files)
+# Runtime data & schedule JSON files (preserves schema and config files)
 *.json
 !*schema*.json
+!package.json
+!**/package.json
+!package-lock.json
+!**/package-lock.json
+!tsconfig.json
+!**/tsconfig.json
 
 # Operating system files
 .DS_Store
 Thumbs.db
+
+# Node dependencies & builds
+node_modules/
+.next/
+dist/
+build/
+# Temporary test directories
+tmp*/
+.test_tmp*/

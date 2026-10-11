@@ -9,7 +9,8 @@ from datetime import date, time
 from uuid import uuid4
 
 # Set test database path before importing app
-temp_dir = tempfile.mkdtemp()
+temp_dir = os.path.join(os.getcwd(), "daily_schedules", "test_api_temp")
+os.makedirs(temp_dir, exist_ok=True)
 os.environ["CONCIERGE_DB_PATH"] = os.path.join(temp_dir, "test_api_sessions.db")
 
 from fastapi.testclient import TestClient

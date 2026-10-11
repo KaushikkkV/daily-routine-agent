@@ -22,8 +22,7 @@ def run_versioning_tests() -> None:
     print("RUNNING SCHEDULE VERSION CONTROL & ROLLBACK TEST SUITE")
     print("=" * 60)
 
-    temp_dir = tempfile.mkdtemp()
-    storage_path = os.path.join(temp_dir, "versioned_schedule.json")
+    storage_path = os.path.join("daily_schedules", "test_versioned_schedule.json")
 
     try:
         # Create initial agent state
@@ -118,7 +117,8 @@ def run_versioning_tests() -> None:
         print("=" * 60)
 
     finally:
-        shutil.rmtree(temp_dir, ignore_errors=True)
+        if os.path.exists(storage_path):
+            os.remove(storage_path)
 
 
 if __name__ == "__main__":

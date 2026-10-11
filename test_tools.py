@@ -122,7 +122,8 @@ def run_all_tests() -> None:
     # TEST 3: save_schedule_to_storage
     # ---------------------------------------------------------
     print("\n[TEST 3] Testing save_schedule_to_storage...")
-    temp_dir = tempfile.mkdtemp()
+    temp_dir = os.path.join(os.getcwd(), "daily_schedules", "test_temp")
+    os.makedirs(temp_dir, exist_ok=True)
     temp_file = os.path.join(temp_dir, "daily_schedule_test.json")
     try:
         save_res = save_schedule_to_storage(schedule=sched, filepath=temp_file)

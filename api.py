@@ -22,6 +22,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from agent_config import AgentConfig
+from guardrails import (
+    get_casual_steering_response,
+    is_casual_or_steering_input,
+    is_incomplete_scheduling_request,
+    is_unanchored_meeting_request,
+)
 from runner import ConciergeRunner, LLMClient, LLMResponse, ToolCallRequest
 from schemas import AgentState, DailySchedule, ScheduleVersion
 from session_store import SQLiteSessionStore
@@ -29,8 +35,11 @@ from tools import (
     bind_agent_state,
     calculate_schedule_blocks,
     get_bound_agent_state,
+    is_chained_multitask_sequence,
+    pack_chained_multitask_sequence,
     parse_task_attributes,
     revert_schedule_to_version,
+    sanitize_task_title,
     save_schedule_to_storage,
 )
 
@@ -58,6 +67,7 @@ app.add_middleware(
         "http://localhost:3001",
         "http://127.0.0.1:3001",
     ],
+    allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -85,6 +95,10 @@ class ChatResponse(BaseModel):
     current_version_id: int = Field(..., description="Active schedule version ID.")
     pending_approval: bool = Field(..., description="Whether a draft schedule awaits user approval.")
     schedule: Optional[DailySchedule] = Field(None, description="Active schedule object or null.")
+    action_chips: List[str] = Field(default_factory=list, description="Action chips for quick interactive selection.")
+    requires_date_selection: bool = Field(default=False, description="Whether inline generative date picker should render.")
+    ui_action: Optional[str] = Field(None, description="Directive for frontend UI, e.g. show_date_time_picker.")
+    default_task: Optional[str] = Field(None, description="Clean task title for interactive date/time picker.")
 
 
 class ScheduleResponse(BaseModel):
@@ -186,8 +200,10 @@ class SmartFallbackLLM:
                 ],
             )
 
-        # 3. Check for previous tool responses in message history
-        tool_msgs = [m for m in messages if m.get("role") == "tool"]
+        # 3. Check for tool responses from the current turn (after latest user message)
+        last_user_idx = max((i for i, m in enumerate(messages) if m.get("role") == "user"), default=0)
+        current_turn_msgs = messages[last_user_idx:]
+        tool_msgs = [m for m in current_turn_msgs if m.get("role") == "tool"]
         last_tool = tool_msgs[-1] if tool_msgs else None
 
         # If calculate_schedule_blocks was just executed, present the schedule
@@ -196,32 +212,50 @@ class SmartFallbackLLM:
                 obs_data = json.loads(last_tool.get("content", "{}"))
                 if obs_data.get("success"):
                     sched = obs_data.get("data", {})
+                    buffer_mins = sched.get("buffer_time_minutes", 0)
                     blocks = sched.get("time_blocks", [])
-                    table_rows = []
-                    for b in blocks:
-                        notes = "Deep work focus" if not b.get("is_buffer") else "Recovery buffer"
-                        table_rows.append(
-                            f"| **{b.get('start_time')} - {b.get('end_time')}** | {b.get('label')} | {notes} |"
+                    task_names = [b.get("label") for b in blocks if not b.get("is_buffer")]
+                    if len(task_names) > 1 and is_chained_multitask_sequence(last_user):
+                        tasks_str = ", ".join(task_names)
+                        start_str = blocks[0].get("start_time", "09:00")[:5] if blocks else "now"
+                        return LLMResponse(
+                            thought=f"Chained multi-task sequence packed into {len(blocks)} blocks starting at {start_str}. Directing user to review timeline.",
+                            content=(
+                                f"I've sequenced your {len(task_names)} activities starting at {start_str}: {tasks_str}. "
+                                f"Please review the timeline on your Schedule Board to adjust or approve."
+                            ),
                         )
-                    table_md = "\n".join(table_rows)
                     return LLMResponse(
                         thought=(
                             "Daily schedule calculated with deep-work recovery buffers. "
-                            "Presenting proposed layout and awaiting user approval before persisting."
+                            "Directing user to review interactive timeline on the Schedule Board."
                         ),
                         content=(
-                            f"Here is your proposed schedule for today:\n\n"
-                            f"| Time Slot | Activity | Notes |\n"
-                            f"| :--- | :--- | :--- |\n"
-                            f"{table_md}\n\n"
-                            f"Total buffer time: **{sched.get('buffer_time_minutes', 0)} mins**.\n\n"
-                            f"**Do you confirm this schedule?** Please reply with 'Yes, save it' or click **Approve** to commit."
+                            f"I've organized your day with high-focus tasks scheduled during morning hours and added "
+                            f"{buffer_mins} minutes of recovery buffers to protect your energy. "
+                            f"Please review the interactive timeline in the right pane and let me know if you'd like to make adjustments or approve it."
                         ),
                     )
             except Exception:
                 pass
 
-        # If parse_task_attributes was just run, call calculate_schedule_blocks
+        # If revert_schedule_to_version was just executed, present rollback confirmation
+        if last_tool and last_tool.get("name") == "revert_schedule_to_version":
+            try:
+                obs_data = json.loads(last_tool.get("content", "{}"))
+                if obs_data.get("success"):
+                    restored_id = obs_data.get("data", {}).get("restored_version_id", 1)
+                    return LLMResponse(
+                        thought=f"Schedule restored to version {restored_id}. Directing user to review restored timeline.",
+                        content=(
+                            f"I've rolled back your schedule to version {restored_id}. "
+                            f"Please review the restored timeline in the right pane to verify your time blocks."
+                        ),
+                    )
+            except Exception:
+                pass
+
+        # If parse_task_attributes was just run, check for missing duration clarification or call calculate_schedule_blocks
         if tool_msgs and any(m.get("name") == "parse_task_attributes" for m in tool_msgs):
             parsed_tasks = []
             for m in tool_msgs:
@@ -234,11 +268,70 @@ class SmartFallbackLLM:
                         pass
 
             if parsed_tasks:
+                # Check for explicit anchor without duration: require professional clarification first!
+                anchor_missing_duration = [
+                    t for t in parsed_tasks
+                    if t.get("has_explicit_start") and not t.get("has_explicit_duration")
+                ]
+                if anchor_missing_duration:
+                    first_anchor = anchor_missing_duration[0]
+                    anchor_time = first_anchor.get("target_start_time") or "the specified time"
+                    return LLMResponse(
+                        thought=f"Task '{first_anchor.get('title')}' specified at anchor time {anchor_time} without duration or end window. Inquiring for target duration before scheduling.",
+                        content=f"I have noted the start time at {anchor_time}. Could you please specify the target end time or duration so I can block this accurately on your agenda?",
+                    )
+
+                # Unanchored Task Protocol for routine habits:
+                # If a single routine/habit task is submitted without any start time or relative indicator,
+                # do NOT automatically place it at 09:00.
+                # Emit a structured clarification response with action chips metadata:
+                # Text: "What time would you prefer to schedule your [TASK_TITLE]?"
+                # Chips: ["Morning (07:00)", "Noon (12:30)", "Evening (18:00)", "Specify Time"]
+                if len(parsed_tasks) == 1:
+                    single_t = parsed_tasks[0]
+                    t_title = single_t.get("title", "Task")
+                    t_cat = single_t.get("category", "")
+                    has_start = single_t.get("has_explicit_start", False)
+                    target_start = single_t.get("target_start_time")
+
+                    habit_keywords = [
+                        "gym", "workout", "exercise", "lunch", "dinner", "breakfast", "meal",
+                        "walk", "chores", "clean", "grocer", "nap", "sleep", "session", "run"
+                    ]
+                    is_habit = (
+                        t_cat in ["Health", "Rest", "Errands"]
+                        or any(hk in t_title.lower() for hk in habit_keywords)
+                    )
+
+                    if not has_start and not target_start and is_habit and not single_t.get("target_date"):
+                        return LLMResponse(
+                            thought=(
+                                f"Single unanchored habit/routine task '{t_title}' detected without start time anchor. "
+                                f"In accordance with Unanchored Task Protocol, prompting user with consultative time clarification chips."
+                            ),
+                            content=f"What time would you prefer to schedule your {t_title}?",
+                            action_chips=["Morning (07:00)", "Noon (12:30)", "Evening (18:00)", "Specify Time"],
+                            requires_date_selection=False,
+                        )
+
                 today_str = dt_date.today().isoformat()
+                target_dates = [t.get("target_date") for t in parsed_tasks if t.get("target_date")]
+                sched_date = target_dates[0] if target_dates else today_str
+
+                target_starts = [
+                    t.get("target_start_time")
+                    for t in parsed_tasks
+                    if t.get("target_start_time")
+                ]
+                start_time = target_starts[0] if target_starts else "09:00"
+                end_time = "17:00"
+                if start_time >= "16:00":
+                    end_time = "23:59"
+
                 return LLMResponse(
                     thought=(
-                        "Tasks normalized into structured TaskItems. Packing into non-overlapping "
-                        "chronological blocks starting at 09:00 with deep-work recovery buffers."
+                        f"Tasks normalized into structured TaskItems. Packing into non-overlapping "
+                        f"chronological blocks for {sched_date} starting at {start_time} with deep-work recovery buffers."
                     ),
                     tool_calls=[
                         ToolCallRequest(
@@ -246,18 +339,224 @@ class SmartFallbackLLM:
                             name="calculate_schedule_blocks",
                             arguments={
                                 "tasks": parsed_tasks,
-                                "start_time": "09:00",
-                                "end_time": "17:00",
-                                "schedule_date": today_str,
+                                "start_time": start_time,
+                                "end_time": end_time,
+                                "schedule_date": sched_date,
                             },
                         )
                     ],
                 )
 
-        # 4. Check for ambiguous input (no duration hints)
+        # 3.5. Check if user is replying with a duration to an anchor-time clarification
+        prev_asst_msgs = [m for m in messages if m.get("role") == "assistant"]
+        last_asst_msg = prev_asst_msgs[-1]["content"] if prev_asst_msgs else ""
+        anchor_match = re.search(
+            r"I have noted the start time at\s+([01]?\d|2[0-3]:[0-5]\d|\d{1,2}:\d{2})",
+            last_asst_msg,
+        )
+        dur_match = re.search(
+            r"\b(?:for\s+)?(\d+(?:\.\d+)?)\s*(?:hours?|hrs?|h|minutes?|mins?|m)\b",
+            last_user_lower,
+        )
+        if anchor_match and dur_match:
+            anchor_time = anchor_match.group(1)
+            prev_user_msgs = [m for m in messages if m.get("role") == "user"]
+            prev_user_query = prev_user_msgs[-2]["content"] if len(prev_user_msgs) >= 2 else "Meeting"
+            dur_val = float(dur_match.group(1))
+            is_hours = any(h in dur_match.group(0).lower() for h in ["hour", "hr", "h"]) and "m" not in dur_match.group(0).lower()
+            dur_minutes = int(dur_val * 60) if is_hours else int(dur_val)
+            dur_minutes = max(5, min(720, dur_minutes))
+            combined_text = f"{prev_user_query} for {dur_minutes} minutes"
+            return LLMResponse(
+                thought=f"User clarified duration ({dur_minutes}m) for commitment anchored at {anchor_time}. Normalizing task attributes.",
+                tool_calls=[
+                    ToolCallRequest(
+                        call_id=f"call_parse_clarified_{uuid4().hex[:4]}",
+                        name="parse_task_attributes",
+                        arguments={"raw_text": combined_text},
+                    )
+                ],
+            )
+
+        # 3.6. Check if user is replying to an unanchored habit clarification
+        habit_clarification_match = re.search(
+            r"What time would you prefer to schedule your\s+([^?]+)\?",
+            last_asst_msg,
+            re.IGNORECASE,
+        )
+        if habit_clarification_match:
+            habit_name = habit_clarification_match.group(1).strip()
+            # If user selected "Specify Time"
+            if "specify time" in last_user_lower:
+                return LLMResponse(
+                    thought=f"User requested to specify custom time for {habit_name}.",
+                    content=f"Please enter your preferred start time for {habit_name} (for example: 'at 16:30' or 'at 07:45').",
+                )
+            # If user selected a chip or entered time e.g. "Morning (07:00)" or "Evening (18:00)" or "at 18:00" or "18:00"
+            time_match = re.search(r"([01]?\d|2[0-3]):([0-5]\d)", last_user)
+            if time_match:
+                chosen_time = f"{int(time_match.group(1)):02d}:{time_match.group(2)}"
+                dur_minutes = 45
+                if any(m in habit_name.lower() for m in ["lunch", "dinner"]):
+                    dur_minutes = 45
+                elif "breakfast" in habit_name.lower():
+                    dur_minutes = 30
+                elif "nap" in habit_name.lower():
+                    dur_minutes = 30
+                combined_text = f"Schedule {habit_name} at {chosen_time} for {dur_minutes} minutes"
+                return LLMResponse(
+                    thought=f"User selected time ({chosen_time}) for habit {habit_name}. Parsing task attributes.",
+                    tool_calls=[
+                        ToolCallRequest(
+                            call_id=f"call_parse_habit_{uuid4().hex[:4]}",
+                            name="parse_task_attributes",
+                            arguments={"raw_text": combined_text},
+                        )
+                    ],
+                )
+
+        # 3.65. Consultative Concierge Steering for Casual / Ambiguous Talk
+        casual_reply = get_casual_steering_response(last_user)
+        if casual_reply:
+            return LLMResponse(
+                thought="Casual conversation, venting, or ambiguous state detected. Engaging with Executive Routine Concierge steering persona offering 2 actionable choices.",
+                content=casual_reply,
+                ui_action=None,
+                requires_date_selection=False,
+                default_task=None,
+                action_chips=[],
+            )
+
+        # 3.66. Confirmation Gate: User responding to steering choices
+        # Case A: Accepted recovery buffer / break
+        break_triggers = [
+            "schedule a 20-minute recovery buffer now", "schedule the break", "schedule a break",
+            "20-minute recovery buffer now", "recovery buffer now", "schedule recovery buffer",
+            "schedule a 15-minute reset buffer now", "15-minute reset buffer now", "reset buffer now",
+            "schedule the reset buffer", "schedule reset buffer", "let's do recovery buffer",
+            "take a break now", "block out 30 minutes for a quick reset now",
+        ]
+        if any(bt in last_user_lower for bt in break_triggers) or (
+            ("recovery buffer" in last_user_lower or "reset buffer" in last_user_lower or "the break" in last_user_lower)
+            and ("schedule" in last_user_lower or "now" in last_user_lower or "yes" in last_user_lower or "do" in last_user_lower)
+        ):
+            cur_time = datetime.now().strftime("%H:%M")
+            dur = 20
+            if "15" in last_user_lower:
+                dur = 15
+            elif "30" in last_user_lower:
+                dur = 30
+            task_item = {
+                "id": str(uuid4()),
+                "title": "Recovery Buffer",
+                "category": "Rest",
+                "estimated_minutes": dur,
+                "priority": "Low",
+                "status": "Pending",
+                "target_start_time": cur_time,
+                "target_date": dt_date.today().isoformat(),
+                "has_explicit_start": True,
+                "has_explicit_duration": True,
+            }
+            return LLMResponse(
+                thought=f"User accepted recovery buffer option. Packing {dur}m Recovery Buffer starting at {cur_time}.",
+                tool_calls=[
+                    ToolCallRequest(
+                        call_id=f"call_calc_buffer_{uuid4().hex[:6]}",
+                        name="calculate_schedule_blocks",
+                        arguments={
+                            "tasks": [task_item],
+                            "start_time": cur_time,
+                            "end_time": "23:59",
+                            "schedule_date": dt_date.today().isoformat(),
+                        },
+                    )
+                ],
+            )
+
+        # Case B: Accepted wrap up early
+        if any(wt in last_user_lower for wt in ["wrap up early", "wrap up today's remaining tasks early", "wrap up remaining tasks"]):
+            return LLMResponse(
+                thought="User chose to wrap up remaining tasks early.",
+                content="Understood! Wrapping up today's commitments early so you can protect your energy and rest. Have a great evening!",
+            )
+
+        # Case C: Accepted map out focus blocks
+        if any(mt in last_user_lower for mt in ["map out your focus blocks", "map out my focus blocks", "map out focus blocks"]):
+            return LLMResponse(
+                thought="User chose to map out focus blocks.",
+                content="Ready whenever you are! What are the primary 2-3 focus blocks or priorities you'd like to tackle today?",
+            )
+
+        # 3.7. Chained Multi-Task Sequencing:
+        if is_chained_multitask_sequence(last_user):
+            pack_result = pack_chained_multitask_sequence(last_user)
+            if pack_result.get("success") and pack_result.get("task_items"):
+                task_items = pack_result["task_items"]
+                anchor = pack_result.get("anchor_start", "09:00")
+                sched_date = task_items[0].get("target_date") if task_items else dt_date.today().isoformat()
+                return LLMResponse(
+                    thought=(
+                        f"Chained multi-task sequence detected with {len(task_items)} activities starting at anchor {anchor}. "
+                        f"Invoking calculate_schedule_blocks to pack timeline in one pass without date picker."
+                    ),
+                    tool_calls=[
+                        ToolCallRequest(
+                            call_id=f"call_seq_{uuid4().hex[:6]}",
+                            name="calculate_schedule_blocks",
+                            arguments={
+                                "tasks": task_items,
+                                "start_time": anchor,
+                                "end_time": "23:59",
+                                "schedule_date": sched_date,
+                            },
+                        )
+                    ],
+                )
+
+        # 3.8. Standalone Incomplete / Unanchored Scheduling Request:
+        if is_incomplete_scheduling_request(last_user):
+            clean_title = sanitize_task_title(last_user)
+            return LLMResponse(
+                thought=f"Standalone unanchored task '{clean_title}' detected without start time or date. Proactively eliciting date and time via enhanced inline picker card.",
+                content=f"I'll help you schedule {clean_title}. Please select your target date and time below.",
+                ui_action="show_date_time_picker",
+                requires_date_selection=True,
+                default_task=clean_title,
+                action_chips=[],
+            )
+
+        # 3.8. Future Date Intent Detection:
+        future_intent_phrases = [
+            "schedule a meeting", "next week", "plan tomorrow", "book slot",
+            "book a slot", "pick a date", "future schedule", "schedule future",
+            "plan for next week", "plan for tomorrow", "schedule meeting"
+        ]
+        has_future_intent = any(phrase in last_user_lower for phrase in future_intent_phrases)
+        has_date_and_dur = bool(re.search(r"\d{4}-\d{2}-\d{2}", last_user)) and bool(
+            re.search(r"\b(?:for\s+)?\d+\s*(?:m|min|mins|minutes?|hour|hours?|h)\b", last_user_lower)
+        )
+
+        if has_future_intent and not has_date_and_dur:
+            return LLMResponse(
+                thought="User expressed future scheduling intent. Flagging requires_date_selection to render inline Generative UI date-picker card.",
+                content="I can help you schedule that! Please select your target date and duration using the calendar card below:",
+                ui_action="show_date_time_picker",
+                requires_date_selection=True,
+                action_chips=[],
+            )
+
+        # 4. Check for ambiguous input (no duration hints and no activity intention)
+        lifestyle_or_action_kws = [
+            "gym", "workout", "dinner", "lunch", "breakfast", "meal", "cook", "walk",
+            "meeting", "sync", "call", "grocer", "laundry", "clean", "break", "rest",
+            "want to", "need to", "have a", "plan to", "going to", "time to", "schedule", "exercise",
+            "sleep", "bedtime", "nap",
+        ]
+        is_routine_or_action = any(kw in last_user_lower for kw in lifestyle_or_action_kws)
         has_numbers = any(char.isdigit() for char in last_user)
         has_duration = any(kw in last_user_lower for kw in ["min", "hour", "hr", "m "])
-        if not has_numbers and not has_duration and len(last_user.split()) > 3:
+        if not is_routine_or_action and not has_numbers and not has_duration and len(last_user.split()) > 3:
             return LLMResponse(
                 thought="User input is ambiguous and missing duration estimates. Under the Pragmatic Assumption Policy, asking 1 clarifying question.",
                 content=(
@@ -393,6 +692,10 @@ class CapturingLLMClient:
     def __init__(self, inner: LLMClient) -> None:
         self.inner = inner
         self.captured_thoughts: List[str] = []
+        self.action_chips: List[str] = []
+        self.requires_date_selection: bool = False
+        self.ui_action: Optional[str] = None
+        self.default_task: Optional[str] = None
 
     def generate(
         self,
@@ -402,6 +705,14 @@ class CapturingLLMClient:
         max_tokens: int,
     ) -> LLMResponse:
         resp = self.inner.generate(messages, tools, temperature, max_tokens)
+        if resp.action_chips:
+            self.action_chips = list(resp.action_chips)
+        if resp.requires_date_selection:
+            self.requires_date_selection = True
+        if resp.ui_action:
+            self.ui_action = resp.ui_action
+        if resp.default_task:
+            self.default_task = resp.default_task
 
         # 1. Thought explicitly in response
         if resp.thought:
@@ -523,12 +834,61 @@ async def chat_endpoint(request: ChatRequest) -> ChatResponse:
     # 7. Persist updated state
     session_store.save(runner.state)
 
+    # 8. Extract action chips & date selection intent
+    action_chips = list(capturing_llm.action_chips)
+    requires_date_selection = capturing_llm.requires_date_selection
+    ui_action = capturing_llm.ui_action
+    default_task = capturing_llm.default_task
+
+    # 0. Casual / Ambiguous / Steering Inputs: Never emit ui_action or default_task!
+    if is_casual_or_steering_input(user_message):
+        ui_action = None
+        requires_date_selection = False
+        default_task = None
+        casual_reply = get_casual_steering_response(user_message)
+        if casual_reply:
+            clean_reply = casual_reply
+    # 1. Chained Multi-Task Sequences: Must pack timeline in one pass and NOT emit ui_action show_date_time_picker!
+    elif is_chained_multitask_sequence(user_message):
+        ui_action = None
+        requires_date_selection = False
+        default_task = None
+    # 2. Standalone Incomplete / Unanchored Task:
+    elif is_incomplete_scheduling_request(user_message):
+        clean_title = sanitize_task_title(user_message)
+        clean_reply = f"I'll help you schedule {clean_title}. Please select your target date and time below."
+        ui_action = "show_date_time_picker"
+        requires_date_selection = True
+        default_task = clean_title
+    elif ui_action == "show_date_time_picker":
+        requires_date_selection = True
+
+    # Safeguard: Habit clarification question in response
+    if "what time would you prefer to schedule" in clean_reply.lower() and not action_chips:
+        action_chips = ["Morning (07:00)", "Noon (12:30)", "Evening (18:00)", "Specify Time"]
+
+    # Safeguard: Future date intent in user message
+    future_intent_phrases = [
+        "schedule a meeting", "next week", "plan tomorrow", "book slot",
+        "book a slot", "pick a date", "future schedule"
+    ]
+    has_date_and_dur = bool(re.search(r"\d{4}-\d{2}-\d{2}", user_message)) and bool(
+        re.search(r"\b(?:for\s+)?\d+\s*(?:m|min|mins|minutes?|hour|hours?|h)\b", user_message.lower())
+    )
+    if not is_casual_or_steering_input(user_message) and not is_chained_multitask_sequence(user_message) and any(phrase in user_message.lower() for phrase in future_intent_phrases) and not has_date_and_dur:
+        requires_date_selection = True
+        ui_action = ui_action or "show_date_time_picker"
+
     return ChatResponse(
         reply=clean_reply,
         thought=isolated_thought,
         current_version_id=runner.state.current_version_id,
         pending_approval=pending_approval,
         schedule=runner.state.active_schedule,
+        action_chips=action_chips,
+        requires_date_selection=requires_date_selection,
+        ui_action=ui_action,
+        default_task=default_task,
     )
 
 

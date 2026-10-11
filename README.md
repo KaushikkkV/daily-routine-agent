@@ -23,7 +23,7 @@ The **Daily Routine & Task Concierge** is an autonomous agent built with a singl
   - *Pre-Execution*: Intercepts prompt injection attacks and off-topic queries with zero LLM token overhead.
   - *Post-Execution*: Prohibits overlapping time allocations and ensures strict 24-hour boundary compliance.
 - **ACID Session Persistence**: Preserves multi-turn conversational history and working memory in a local SQLite store across restarts.
-- **Circuit Breaker**: Halts runaway recursive tool iterations at `max_iterations = 5`.
+- **Circuit Breaker**: Halts runaway recursive tool iterations at `max_iterations = 10` with graceful recovery fallback.
 
 ---
 

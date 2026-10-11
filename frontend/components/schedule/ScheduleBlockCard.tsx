@@ -11,6 +11,7 @@ import {
   CheckCircle2,
   AlertCircle,
   ShieldAlert,
+  Moon,
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { BorderGlow } from "@/components/effects/BorderGlow";
@@ -99,6 +100,20 @@ export const ScheduleBlockCard: React.FC<ScheduleBlockCardProps> = ({
       labelColor: "text-indigo-200",
       glowActive: isPendingApproval,
     };
+  } else if (
+    category === "Rest" ||
+    category === "Sleep" ||
+    /sleep|rest|nap|wind[\s-]?down|bedtime/i.test(block.label) ||
+    /sleep|rest|nap|wind[\s-]?down|bedtime/i.test(task?.title || "")
+  ) {
+    cardAccent = {
+      badgeVariant: "outline",
+      borderGlowColor: "#818cf8", // soft indigo
+      icon: Moon,
+      bgGradient: "from-indigo-950/20 via-zinc-900/50 to-zinc-950",
+      labelColor: "text-indigo-200",
+      glowActive: isPendingApproval,
+    };
   } else if (category === "Health") {
     cardAccent = {
       badgeVariant: "health",
@@ -119,6 +134,12 @@ export const ScheduleBlockCard: React.FC<ScheduleBlockCardProps> = ({
     };
   }
 
+  const isSleepOrRest =
+    category === "Rest" ||
+    category === "Sleep" ||
+    /sleep|rest|nap|wind[\s-]?down|bedtime/i.test(block.label) ||
+    /sleep|rest|nap|wind[\s-]?down|bedtime/i.test(task?.title || "");
+
   const IconComponent = cardAccent.icon;
 
   const cardInner = (
@@ -133,6 +154,8 @@ export const ScheduleBlockCard: React.FC<ScheduleBlockCardProps> = ({
               ? "bg-emerald-500/15 border-emerald-500/30 text-emerald-400"
               : category === "Deep Work"
               ? "bg-indigo-500/15 border-indigo-500/30 text-indigo-400"
+              : isSleepOrRest
+              ? "bg-indigo-500/15 border-indigo-500/30 text-indigo-300"
               : "bg-zinc-800/80 border-zinc-700/60 text-zinc-300"
           }`}
         >
@@ -165,8 +188,10 @@ export const ScheduleBlockCard: React.FC<ScheduleBlockCardProps> = ({
             </p>
           ) : (
             <div className="mt-1 flex items-center gap-2">
-              <Badge variant={cardAccent.badgeVariant}>{category}</Badge>
-              {task?.priority && (
+              <Badge variant={cardAccent.badgeVariant}>
+                {isSleepOrRest ? "Rest" : category}
+              </Badge>
+              {!isSleepOrRest && task?.priority && task.priority !== "None" && (
                 <span
                   className={`text-[10px] font-semibold uppercase px-2 py-0.5 rounded-full border ${
                     task.priority === "Critical"

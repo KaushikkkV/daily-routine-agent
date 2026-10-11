@@ -10,8 +10,8 @@ export interface TimeBlock {
   is_buffer: boolean;
 }
 
-export type TaskCategory = "Deep Work" | "Shallow Work" | "Errands" | "Health";
-export type TaskPriority = "Low" | "Medium" | "High" | "Critical";
+export type TaskCategory = "Deep Work" | "Shallow Work" | "Errands" | "Health" | "Rest";
+export type TaskPriority = "Low" | "Medium" | "High" | "Critical" | "None";
 export type TaskStatus = "Pending" | "In Progress" | "Completed" | "Cancelled" | "Deferred";
 
 export interface TaskItem {
@@ -48,6 +48,10 @@ export interface ChatResponse {
   current_version_id: number;
   pending_approval: boolean;
   schedule?: DailySchedule | null;
+  action_chips?: string[];
+  requires_date_selection?: boolean;
+  ui_action?: string | null;
+  default_task?: string | null;
 }
 
 export interface ScheduleResponse {
@@ -80,25 +84,55 @@ export interface ApproveResponse {
   version_history: ScheduleVersion[];
 }
 
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+let activeApiBase = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+
+const CANDIDATE_URLS = process.env.NEXT_PUBLIC_API_URL
+  ? [process.env.NEXT_PUBLIC_API_URL]
+  : [
+      "http://localhost:8000",
+      "http://127.0.0.1:8000",
+      "http://localhost:8001",
+      "http://127.0.0.1:8001",
+    ];
+
+export function getApiBase(): string {
+  return activeApiBase;
+}
 
 export async function checkBackendHealth(): Promise<boolean> {
+  // 1. First probe current activeApiBase
   try {
-    const res = await fetch(`${API_BASE}/api/health`, {
+    const res = await fetch(`${activeApiBase}/api/health`, {
       method: "GET",
       cache: "no-store",
     });
-    return res.ok;
-  } catch {
-    return false;
+    if (res.ok) return true;
+  } catch {}
+
+  // 2. If not reachable, auto-discover alternative ports (e.g. 8000 or 8001)
+  for (const candidate of CANDIDATE_URLS) {
+    if (candidate === activeApiBase) continue;
+    try {
+      const res = await fetch(`${candidate}/api/health`, {
+        method: "GET",
+        cache: "no-store",
+      });
+      if (res.ok) {
+        activeApiBase = candidate;
+        return true;
+      }
+    } catch {}
   }
+
+  return false;
 }
 
 export async function sendChatMessage(
   sessionId: string,
   message: string
 ): Promise<ChatResponse> {
-  const res = await fetch(`${API_BASE}/api/chat`, {
+  const base = getApiBase();
+  const res = await fetch(`${base}/api/chat`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ session_id: sessionId, message }),
@@ -113,7 +147,8 @@ export async function sendChatMessage(
 }
 
 export async function getSchedule(sessionId: string): Promise<ScheduleResponse> {
-  const res = await fetch(`${API_BASE}/api/schedule/${encodeURIComponent(sessionId)}`, {
+  const base = getApiBase();
+  const res = await fetch(`${base}/api/schedule/${encodeURIComponent(sessionId)}`, {
     method: "GET",
     cache: "no-store",
   });
@@ -130,8 +165,9 @@ export async function rollbackSchedule(
   sessionId: string,
   targetVersionId: number
 ): Promise<RollbackResponse> {
+  const base = getApiBase();
   const res = await fetch(
-    `${API_BASE}/api/schedule/${encodeURIComponent(sessionId)}/rollback`,
+    `${base}/api/schedule/${encodeURIComponent(sessionId)}/rollback`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -148,8 +184,9 @@ export async function rollbackSchedule(
 }
 
 export async function approveSchedule(sessionId: string): Promise<ApproveResponse> {
+  const base = getApiBase();
   const res = await fetch(
-    `${API_BASE}/api/schedule/${encodeURIComponent(sessionId)}/approve`,
+    `${base}/api/schedule/${encodeURIComponent(sessionId)}/approve`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },

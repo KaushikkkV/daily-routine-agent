@@ -15,6 +15,9 @@ import {
   Sparkles,
   ChevronDown,
   Edit3,
+  Download,
+  Activity,
+  ShieldCheck,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -25,9 +28,21 @@ import {
   DropdownMenu,
   DropdownMenuTrigger,
   DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
 } from "@/components/ui/dropdown-menu";
 import { ScheduleBlockCard } from "./ScheduleBlockCard";
 import { DailySchedule, ScheduleVersion, TaskItem } from "@/lib/api";
+import {
+  downloadICS,
+  getGoogleCalendarUrl,
+  getPrimaryFocusBlock,
+  calculateCognitiveHealth,
+} from "@/lib/calendarExport";
+import { Calendar as CalendarComponent } from "@/components/ui/calendar";
+import { Popover, PopoverTrigger, PopoverContent } from "@/components/ui/popover";
+import { format } from "date-fns";
 
 interface ScheduleBoardProps {
   schedule?: DailySchedule | null;
@@ -37,6 +52,7 @@ interface ScheduleBoardProps {
   onApprove: () => Promise<void>;
   onRollback: (versionId: number) => Promise<void>;
   onAdjustSchedule?: () => void;
+  onDateChange?: (dateStr: string) => void;
   isApproving: boolean;
   isRollingBack: boolean;
 }
@@ -49,22 +65,46 @@ export const ScheduleBoard: React.FC<ScheduleBoardProps> = ({
   onApprove,
   onRollback,
   onAdjustSchedule,
+  onDateChange,
   isApproving,
   isRollingBack,
 }) => {
-  // Compute summary stats
-  const blocks = schedule?.time_blocks || [];
+  const [selectedDate, setSelectedDate] = useState<Date | undefined>(undefined);
+  const [isDatePickerOpen, setIsDatePickerOpen] = useState(false);
+
+  // Sync selectedDate with schedule.date or client mount
+  React.useEffect(() => {
+    if (schedule?.date) {
+      try {
+        const [y, m, d] = schedule.date.split("-").map(Number);
+        setSelectedDate(new Date(y, m - 1, d));
+      } catch {
+        setSelectedDate(new Date());
+      }
+    } else {
+      setSelectedDate(new Date());
+    }
+  }, [schedule?.date]);
+
+  const handleSelectDate = (date: Date | undefined) => {
+    setSelectedDate(date);
+    setIsDatePickerOpen(false);
+    if (date) {
+      const isoString = format(date, "yyyy-MM-dd");
+      onDateChange?.(isoString);
+    }
+  };
+
+  // Compute summary stats & cognitive metrics
+  const blocks = schedule?.time_blocks || (schedule as any)?.blocks || [];
   const tasks = schedule?.tasks_allocated || [];
   const bufferMins = schedule?.buffer_time_minutes || 0;
+
+  const cognitiveMetrics = calculateCognitiveHealth(blocks, tasks, schedule?.date);
 
   const deepWorkMins = tasks
     .filter((t) => t.category === "Deep Work")
     .reduce((acc, t) => acc + (t.estimated_minutes || 0), 0);
-
-  const totalWorkMins = tasks.reduce(
-    (acc, t) => acc + (t.estimated_minutes || 0),
-    0
-  );
 
   const taskMap = new Map<string, TaskItem>();
   tasks.forEach((t) => {
@@ -72,28 +112,109 @@ export const ScheduleBoard: React.FC<ScheduleBoardProps> = ({
     taskMap.set(t.title.toLowerCase(), t);
   });
 
+  const WORK_CATEGORIES = [
+    "deep_work",
+    "deep work",
+    "shallow_work",
+    "shallow work",
+    "work",
+    "errand",
+    "errands",
+    "meeting",
+    "task",
+  ];
+
+  const totalWorkMins = blocks
+    .filter((b) => {
+      if (b.is_buffer) return false;
+      const mappedTask =
+        (b.task_id && taskMap.get(b.task_id)) ||
+        taskMap.get(b.label.toLowerCase()) ||
+        tasks.find((t) => b.label.toLowerCase().includes(t.title.toLowerCase()));
+
+      const cat = ((b as any).category || mappedTask?.category || "")
+        .toLowerCase()
+        .replace(/[\s-]+/g, "_");
+
+      const label = (b.label || "").toLowerCase();
+      if (
+        cat.includes("rest") ||
+        cat.includes("sleep") ||
+        cat.includes("health") ||
+        cat.includes("fitness") ||
+        /sleep|rest|nap|wind[\s-]?down|bedtime/i.test(label)
+      ) {
+        return false;
+      }
+
+      return WORK_CATEGORIES.some((wc) => cat.includes(wc) || cat === wc);
+    })
+    .reduce((acc, b) => {
+      const mappedTask =
+        (b.task_id && taskMap.get(b.task_id)) ||
+        taskMap.get(b.label.toLowerCase());
+
+      const duration =
+        (b as any).duration_minutes ||
+        (b as any).duration ||
+        mappedTask?.estimated_minutes ||
+        0;
+
+      if (duration > 0) return acc + duration;
+
+      try {
+        const [sh, sm] = (b.start_time || "09:00").split(":").map(Number);
+        const [eh, em] = (b.end_time || "10:00").split(":").map(Number);
+        return acc + Math.max(0, eh * 60 + em - (sh * 60 + sm));
+      } catch {
+        return acc;
+      }
+    }, 0);
+
   return (
-    <div className="flex h-full flex-col bg-zinc-950 text-zinc-100">
-      {/* Header with high stacking context */}
-      <div className="relative z-30 flex h-14 shrink-0 items-center justify-between border-b border-zinc-800/80 px-5 bg-zinc-900/40 backdrop-blur-md">
+    <div id="schedule-board-container" className="flex h-full flex-col bg-zinc-950 text-zinc-100">
+      {/* 1. Header with high stacking context */}
+      <div id="schedule-board-header" className="relative z-30 flex h-14 shrink-0 items-center justify-between border-b border-zinc-800/80 px-5 bg-zinc-900/40 backdrop-blur-md">
         <div className="flex items-center gap-3">
           <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-indigo-600/20 text-indigo-400 ring-1 ring-indigo-500/30">
             <Calendar className="h-4 w-4" />
           </div>
-          <div>
-            <h2 className="text-sm font-semibold tracking-tight text-zinc-100 flex items-center gap-2">
+          <div className="flex items-center gap-2.5">
+            <h2 className="text-sm font-semibold tracking-tight text-zinc-100">
               Timeline Agenda
-              {schedule?.date && (
-                <span className="text-xs font-mono font-normal text-zinc-400">
-                  [{schedule.date}]
-                </span>
-              )}
             </h2>
+            <Popover open={isDatePickerOpen} onOpenChange={setIsDatePickerOpen}>
+              <PopoverTrigger asChild>
+                <Button
+                  id="date-picker-button"
+                  variant="outline"
+                  size="sm"
+                  className="h-7 gap-1.5 px-2.5 text-xs font-mono font-medium text-zinc-300 border-zinc-800 bg-zinc-900/80 hover:bg-zinc-800 hover:text-white transition-all shadow-sm"
+                  title="Select schedule date"
+                >
+                  <Calendar className="h-3.5 w-3.5 text-indigo-400" />
+                  <span>
+                    {selectedDate
+                      ? format(selectedDate, "yyyy-MM-dd")
+                      : schedule?.date || "Pick Date"}
+                  </span>
+                  <ChevronDown className="h-3 w-3 text-zinc-500" />
+                </Button>
+              </PopoverTrigger>
+              <PopoverContent align="start" className="w-auto p-1 z-50">
+                <CalendarComponent
+                  mode="single"
+                  selected={selectedDate}
+                  onSelect={handleSelectDate}
+                />
+              </PopoverContent>
+            </Popover>
           </div>
         </div>
 
-        {/* Version Badge & History Controls */}
-        <div className="flex items-center gap-2">
+        {/* Version Badge, History Controls & Export Suite */}
+        <div id="timeline-controls-header" className="flex items-center gap-2">
+          {/* Version Badge */}
           <BorderGlow
             glowColor={pendingApproval ? "#f59e0b" : "#6366f1"}
             glowOpacity={0.6}
@@ -189,15 +310,126 @@ export const ScheduleBoard: React.FC<ScheduleBoardProps> = ({
               </div>
             </DropdownMenuContent>
           </DropdownMenu>
+
+          {/* Calendar Export Suite Dropdown */}
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={!blocks || blocks.length === 0}
+                className="h-8 gap-1.5 text-xs text-zinc-300 border-zinc-800 hover:bg-zinc-800 disabled:opacity-40 disabled:cursor-not-allowed"
+                title={!blocks || blocks.length === 0 ? "Generate a schedule first to enable export" : "Export Schedule to Calendar"}
+              >
+                <Download className="h-3.5 w-3.5 text-indigo-400" />
+                <span>Export</span>
+                <ChevronDown className="h-3 w-3 text-zinc-500" />
+              </Button>
+            </DropdownMenuTrigger>
+
+            <DropdownMenuContent
+              align="end"
+              sideOffset={4}
+              className="w-64 p-1.5 z-[100] border-zinc-800 bg-zinc-900/95 shadow-2xl backdrop-blur-md"
+            >
+              <DropdownMenuLabel className="text-[11px] font-mono text-zinc-400 px-2 py-1 flex items-center justify-between">
+                <span>Calendar Export Suite</span>
+                <span className="text-[10px] text-zinc-500 font-normal">Client-Side</span>
+              </DropdownMenuLabel>
+              <DropdownMenuSeparator />
+
+              <DropdownMenuItem
+                disabled={!blocks || blocks.length === 0}
+                onClick={() => downloadICS(blocks, schedule?.date)}
+                className="gap-2.5 px-2.5 py-2 text-xs text-zinc-200 hover:text-white cursor-pointer"
+              >
+                <div className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-indigo-600/20 text-indigo-400">
+                  <Download className="h-3.5 w-3.5" />
+                </div>
+                <div className="flex flex-col text-left">
+                  <span className="font-medium">Download iCal / Outlook (.ics)</span>
+                  <span className="text-[10px] text-zinc-400">Full timeline with buffers</span>
+                </div>
+              </DropdownMenuItem>
+
+              <DropdownMenuItem
+                disabled={!blocks || blocks.length === 0}
+                onClick={() => {
+                  const primaryBlock = getPrimaryFocusBlock(blocks);
+                  if (primaryBlock) {
+                    const url = getGoogleCalendarUrl(primaryBlock, schedule?.date);
+                    window.open(url, "_blank", "noopener,noreferrer");
+                  }
+                }}
+                className="gap-2.5 px-2.5 py-2 text-xs text-zinc-200 hover:text-white cursor-pointer mt-0.5"
+              >
+                <div className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-emerald-600/20 text-emerald-400">
+                  <Calendar className="h-3.5 w-3.5" />
+                </div>
+                <div className="flex flex-col text-left">
+                  <span className="font-medium">Add to Google Calendar</span>
+                  <span className="text-[10px] text-zinc-400">Primary focus block link</span>
+                </div>
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
+        </div>
+      </div>
+
+      {/* 2. Cognitive Health & Balance Analytics Strip */}
+      <div id="cognitive-balance-strip" className="shrink-0 border-b border-zinc-800/60 bg-zinc-900/30 px-4 sm:px-5 py-2.5 backdrop-blur-sm flex flex-wrap items-center justify-between gap-2.5">
+        <div className="flex flex-wrap items-center gap-2 sm:gap-3">
+          <div className="flex items-center gap-1.5 text-xs font-semibold text-zinc-300">
+            <Activity className="h-3.5 w-3.5 text-indigo-400 shrink-0" />
+            <span className="hidden sm:inline">Cognitive Balance:</span>
+          </div>
+
+          <div className="flex items-center gap-2 flex-wrap">
+            {/* Deep Work Focus Hours */}
+            <div className="inline-flex items-center gap-1.5 rounded-lg border border-indigo-500/20 bg-indigo-500/10 px-2.5 py-1 text-xs font-medium text-indigo-300 font-mono">
+              <Zap className="h-3 w-3 text-indigo-400 shrink-0" />
+              <span>{cognitiveMetrics.deepWorkHoursFormatted}</span>
+            </div>
+
+            {/* Cognitive Buffers */}
+            <div className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-500/20 bg-emerald-500/10 px-2.5 py-1 text-xs font-medium text-emerald-300 font-mono">
+              <Coffee className="h-3 w-3 text-emerald-400 shrink-0" />
+              <span>{cognitiveMetrics.bufferMinutesFormatted}</span>
+            </div>
+          </div>
+        </div>
+
+        {/* Health Score Badge */}
+        <div className="flex items-center gap-2 shrink-0">
+          {cognitiveMetrics.badgeVariant === "optimal" ? (
+            <Badge
+              variant="outline"
+              className="bg-emerald-500/10 text-emerald-300 border-emerald-500/30 gap-1.5 px-2.5 py-0.5 text-xs font-medium cursor-help"
+              title={cognitiveMetrics.complianceReason}
+            >
+              <ShieldCheck className="h-3.5 w-3.5 text-emerald-400 shrink-0" />
+              <span>{cognitiveMetrics.badgeLabel}</span>
+            </Badge>
+          ) : (
+            <Badge
+              variant="outline"
+              className="bg-amber-500/10 text-amber-300 border-amber-500/30 gap-1.5 px-2.5 py-0.5 text-xs font-medium cursor-help"
+              title={cognitiveMetrics.complianceReason}
+            >
+              <AlertTriangle className="h-3.5 w-3.5 text-amber-400 shrink-0" />
+              <span>{cognitiveMetrics.badgeLabel}</span>
+            </Badge>
+          )}
         </div>
       </div>
 
       {/* Main Content Area */}
-      <ScrollArea className="flex-1 p-5">
+      <ScrollArea id="schedule-main-area" className="flex-1 p-5">
         {/* Pending Approval Gate Alert Banner */}
         <AnimatePresence>
           {pendingApproval && (
             <motion.div
+              id="schedule-confirmation-banner"
               initial={{ opacity: 0, y: -10 }}
               animate={{ opacity: 1, y: 0 }}
               exit={{ opacity: 0, y: -10 }}

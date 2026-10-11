@@ -7,6 +7,7 @@ from datetime import date, datetime, time, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
 from schemas import DailySchedule, TaskCategory, TimeBlock
+from tools import is_chained_multitask_sequence, sanitize_task_title
 
 
 class GuardrailViolation(Exception):
@@ -48,6 +49,7 @@ INJECTION_PATTERNS = [
 
 # Domain keywords matched as discrete words or phrases
 CORE_DOMAIN_TERMS = [
+    # Core Task & Scheduling terms
     r"\btasks?\b",
     r"\bschedules?\b",
     r"\bscheduling\b",
@@ -56,6 +58,11 @@ CORE_DOMAIN_TERMS = [
     r"\bto-dos?\b",
     r"\bplans?\b",
     r"\bplanning\b",
+    r"\bset\s*up\b",
+    r"\bsetup\b",
+    r"\bbook(?:ing)?s?\b",
+    r"\bblock(?:ing)?s?\b",
+    r"\bslots?\b",
     r"\bagenda\b",
     r"\bcalendar\b",
     r"\bdeep\s+work\b",
@@ -70,19 +77,264 @@ CORE_DOMAIN_TERMS = [
     r"\bundo\b",
     r"\brollbacks?\b",
     r"\bversions?\b",
+    # Lifestyle, Fitness & Wellness
+    r"\bgyms?\b",
+    r"\bworkouts?\b",
+    r"\bexercise\b",
+    r"\bfitness\b",
+    r"\bruns?\b",
+    r"\brunning\b",
+    r"\bjogs?\b",
+    r"\bjogging\b",
+    r"\bwalks?\b",
+    r"\bwalking\b",
+    r"\byoga\b",
+    r"\bstretch(?:ing)?\b",
+    r"\bmeditat(?:e|ion|ing)?\b",
+    r"\bcardio\b",
+    r"\bswims?\b",
+    r"\bswimming\b",
+    r"\bcycl(?:e|ing)|bike|biking\b",
+    r"\bdoctor\b",
+    r"\bdentist\b",
+    r"\bappointments?\b",
+    r"\btherap(?:y|ist)\b",
+    r"\bnaps?\b",
+    r"\brest\b",
+    r"\brecovery\b",
+    r"\bsleep\b",
+    # Meals & Breaks
+    r"\blunch\b",
+    r"\bdinner\b",
+    r"\bbreakfast\b",
+    r"\bmeals?\b",
+    r"\beats?\b",
+    r"\beating\b",
+    r"\bcook(?:ing)?\b",
+    r"\bfood\b",
+    r"\bcoffee\b",
+    r"\btea\b",
+    r"\bsnacks?\b",
+    r"\bbreaks?\b",
+    r"\bslack\b",
+    # Chores, Personal & Household
+    r"\bshower(?:ing)?\b",
+    r"\bbaths?\b",
+    r"\bhygiene\b",
+    r"\bchores?\b",
+    r"\bgrocer(?:y|ies)\b",
+    r"\blaundry\b",
+    r"\bdishes\b",
+    r"\bclean(?:ing)?\b",
+    r"\bbuys?\b",
+    r"\bshops?\b",
+    r"\bshopping\b",
+    r"\bcommute|commuting|drive|driving\b",
+    # Work, Meetings & Collaboration
+    r"\bmeet(?:ing)?s?\b",
+    r"\bcalls?\b",
+    r"\bsyncs?\b",
+    r"\bstandups?\b",
+    r"\bcatchups?\b",
+    r"\b1:1\b",
+    r"\b1-on-1\b",
+    r"\binterviews?\b",
+    r"\bpresentation\b",
+    r"\breviews?\b",
+    r"\bemails?\b",
+    r"\bcoding|codes?\b",
+    r"\bdebug(?:ging)?\b",
+    r"\bwrit(?:e|ing)\b",
+    r"\bdrafts?\b",
+    r"\bread(?:ing)?\b",
+    r"\bstud(?:y|ying)\b",
+    r"\bresearch\b",
+    # Activity Intention & Action Verbs
+    r"\b(?:want|need|have|plan|going)\s+to\b",
+    r"\b(?:go\s+to|attend|schedule|start|finish|do)\b",
+    r"\b(?:tomorrow|today|tonight|next\s+week|this\s+week|slot|slots|book|booking)\b",
 ]
 
-# Obvious off-topic intents to immediately reject
+# Purely out-of-domain intents to reject (trivia, general knowledge, essays, jokes, weather, code tutorials)
 OFF_TOPIC_INTENT_PATTERNS = [
-    r"\b(?:write|tell)\s+(?:me\s+)?(?:a\s+)?(?:poem|joke|story|song|essay|riddle)\b",
-    r"\b(?:what|who|where|when|why)\s+is\s+(?:the\s+)?(?:capital|president|meaning|distance|history)\b",
-    r"\bhow\s+to\s+(?:hack|bake|cook|invest|build\s+a\s+bomb)\b",
-    r"\bexplain\s+(?:quantum|physics|relativity|calculus|philosophy)\b",
+    # Creative writing, poems, jokes, stories, essays
+    r"\b(?:write|tell)\s+(?:me\s+)?(?:a\s+)?(?:poem|joke|story|song|essay|riddle|fairy\s*tale|speech)\b",
+    # Factual encyclopedic Q&A and historical trivia
+    r"\b(?:what|who|where|when|why)\s+is\s+(?:the\s+)?(?:capital|president|meaning\s+of\s+life|distance\s+to|history\s+of|population\s+of|currency\s+of|founder\s+of|inventor\s+of)\b",
+    r"\bwho\s+(?:was|is)\s+(?:the\s+)?(?:first|president|king|queen|emperor|prime\s+minister)\b",
+    # Weather inquiries
+    r"\b(?:how|what)\s+(?:is|about)\s+the\s+weather\b",
+    r"\bweather\s+(?:forecast|today|tomorrow|in\s+\w+)\b",
+    r"\b(?:will|is\s+it\s+going\s+to)\s+rain\s+today\b",
+    # Coding assistance and programming tutorials
+    r"\b(?:write|code|program)\s+(?:a|an|some)?\s*(?:python|javascript|typescript|react|sql|html|css|c\+\+|java|go|rust|script|function|app|bot|api)\b",
+    r"\bhow\s+to\s+(?:code|program|build\s+a\s+website|write\s+a\s+function|fix\s+this\s+bug)\b",
+    # Academic/scientific explanations
+    r"\bexplain\s+(?:quantum|physics|relativity|calculus|philosophy|photosynthesis|thermodynamics|gravity)\b",
+    # Malicious
+    r"\bhow\s+to\s+(?:hack|invest|build\s+a\s+bomb)\b",
 ]
+
+
+# Casual / Ambiguous / Venting Patterns with Contextual Steering Responses
+CASUAL_STEERING_PATTERNS = [
+    # 1. Greetings & Casual Openers ("yo", "hey", "what's up", "sup", "hi", "hello")
+    (
+        r"^(?:yo(?:[\s,]+concierge)?|hey(?:[\s,]+there)?|hi(?:[\s,]+there)?|hello|what'?s\s+up|whats\s+up|sup|howdy|good\s+(?:morning|afternoon|evening))[\s!?.~]*$",
+        "Hey! Ready whenever you are. Should we map out your focus blocks for today, or are you looking to schedule a specific workout or meeting?",
+    ),
+    # 2. Fatigue, Exhaustion, Sleepiness ("feeling tired", "exhausted", "so tired", etc.)
+    (
+        r"\b(?:feeling\s+tired|feel\s+tired|so\s+tired|exhausted|feeling\s+exhausted|im\s+tired|i'm\s+tired|im\s+exhausted|i'm\s+exhausted|sleepy|feeling\s+sleepy|drained|feeling\s+drained|burnt\s+out)\b",
+        "Sounds like you need to protect your energy. Should we schedule a 20-minute recovery buffer now, or wrap up today's remaining tasks early?",
+    ),
+    # 3. Post-Meal / Afternoon Slump ("just had lunch", "just finished lunch", "had lunch", etc.)
+    (
+        r"\b(?:just\s+had\s+lunch|just\s+finished\s+lunch|had\s+lunch|ate\s+lunch|finished\s+lunch|just\s+ate\s+lunch|done\s+with\s+lunch|just\s+had\s+a\s+meal|just\s+ate)\b",
+        "Hope it was good. Should we lock in a low-intensity shallow work block to beat the afternoon slump, or jump straight into deep work?",
+    ),
+    # 4. Overwhelm & Stress ("feeling overwhelmed", "overwhelmed", "stressed", "so much to do")
+    (
+        r"\b(?:feeling\s+overwhelmed|feel\s+overwhelmed|overwhelmed|so\s+overwhelmed|im\s+overwhelmed|i'm\s+overwhelmed|stressed|feeling\s+stressed|so\s+much\s+to\s+do|anxious|frazzled)\b",
+        "Take a breath—we'll get everything under control. Should we schedule a 15-minute reset buffer now, or quickly prioritize your top three must-do items?",
+    ),
+    # 5. Boredom & Aimless state ("im bored", "bored", "so bored", "nothing to do")
+    (
+        r"\b(?:i(?:'m|\s+am)\s+bored|feeling\s+bored|im\s+bored|bored|so\s+bored|nothing\s+to\s+do|what\s+should\s+i\s+do)\b",
+        "Let's build some positive momentum. Should we kick off a 45-minute deep focus sprint, or knock out a few quick operational errands first?",
+    ),
+]
+
+
+def is_casual_or_steering_input(user_input: str) -> bool:
+    """Check if input is casual talk, greeting, emotional venting, or post-meal status."""
+    return get_casual_steering_response(user_input) is not None
+
+
+def get_casual_steering_response(user_input: str) -> Optional[str]:
+    """Identify casual conversation, status updates, or emotional venting,
+    and return an executive concierge steering response with 2 actionable choices.
+
+    Returns None if the input contains a concrete schedulable task or command.
+    """
+    clean = user_input.strip()
+    if not clean:
+        return None
+    lower = clean.lower()
+
+    if is_chained_multitask_sequence(lower):
+        return None
+
+    # Confirmation / rollback phrases are not casual steering
+    confirmation_phrases = ["yes", "save", "approve", "confirm", "commit", "rollback", "revert", "undo"]
+    if any(lower == p or lower.startswith(f"{p} ") for p in confirmation_phrases):
+        return None
+
+    # Check CASUAL_STEERING_PATTERNS in order
+    for pattern, response in CASUAL_STEERING_PATTERNS:
+        if re.search(pattern, lower, re.IGNORECASE):
+            # Check if there's also an explicit task creation command with target, e.g. "schedule a meeting at 12"
+            if re.search(r"\b(?:schedule|book|set\s+up)\s+(?:a\s+)?(?:meeting|gym|call|workout|dentist|appointment)\b", lower):
+                return None
+            return response
+
+    return None
+
+
+def is_incomplete_scheduling_request(user_input: str) -> bool:
+    """Determine whether an in-domain user query expresses scheduling intent but lacks parameters.
+
+    Incomplete requests include shorthand, habits, meetings, or conversational tasks that lack
+    an explicit start time anchor (e.g. 'at 12', '14:00') or duration (e.g. '30m', '1 hour'):
+        - "setup a meet", "SETUP A MEET"
+        - "gym tomorrow"
+        - "dinner with team"
+        - "quick call"
+        - "i wanna go to gym"
+        - "schedule a call", "set up a call"
+        - "schedule a meeting", "set up a meeting"
+        - "coffee with sarah"
+        - "doctor appointment"
+        - "dentist next week"
+        - "dentist"
+        - "workout"
+        - "book a slot"
+
+    Returns:
+        True if the request has scheduling intent but lacks parameters, False otherwise.
+    """
+    clean = user_input.strip().lower()
+
+    # Casual chit-chat, greetings, or venting are steered conversationally and are NOT incomplete task requests
+    if is_casual_or_steering_input(clean):
+        return False
+
+    # Confirmations, approvals, rollbacks are NOT incomplete requests
+    confirmation_phrases = ["yes", "save", "approve", "confirm", "commit", "rollback", "revert", "undo", "looks good", "ok", "okay"]
+    if any(clean == p or clean.startswith(f"{p} ") or clean.startswith(f"{p},") for p in confirmation_phrases):
+        return False
+
+    # Chained multi-task sequences are planned in one pass and are NOT incomplete standalone requests
+    if is_chained_multitask_sequence(clean):
+        return False
+
+    # Must contain a task, activity, routine, or scheduling indicator keyword
+    task_intent_keywords = [
+        "meet", "call", "sync", "standup", "appointment", "slot", "calendar",
+        "gym", "workout", "exercise", "run", "walk", "yoga", "meditat",
+        "dinner", "lunch", "breakfast", "cook", "meal", "food", "coffee", "tea",
+        "dentist", "doctor", "therapy", "errand", "grocer", "laundry", "clean",
+        "dishes", "chore", "code", "coding", "draft", "write", "study", "research",
+        "nap", "sleep", "rest", "break", "schedule", "plan", "book", "set up", "setup",
+        "priorit", "todo", "to-do", "task", "work", "deep work", "shallow work"
+    ]
+    if not any(kw in clean for kw in task_intent_keywords):
+        return False
+
+    # Check for explicit start time anchor (e.g. "now", "at 12", "at 3pm", "10:30", "in 5 minutes", "after 10m", "02:30 PM")
+    has_explicit_time = bool(
+        re.search(
+            r"\b(?:now|right\s+now|immediately|at\s+\d{1,2}(?::\d{2})?|\d{1,2}(?::\d{2})?\s*(?:am|pm)|(?:in|after)\s+\d+\s*(?:m|min|mins|minutes?|h|hours?))\b",
+            clean,
+            re.IGNORECASE,
+        )
+    )
+    if has_explicit_time:
+        return False
+
+    # Check for explicit duration (e.g. "30m", "45 mins", "1 hour", "for 2h")
+    has_explicit_duration = bool(
+        re.search(
+            r"\b(?:\d+(?:\.\d+)?)\s*(?:m|min|mins|minutes?|h|hrs?|hours?)\b",
+            clean,
+            re.IGNORECASE,
+        )
+    )
+    if has_explicit_duration:
+        return False
+
+    # Check for multi-task requests with delimiters
+    items = [line.strip("-•* ").strip() for line in re.split(r"[,;\n]", clean) if line.strip("-•* ").strip()]
+    if len(items) > 1 and any(re.search(r"\d+", it) for it in items):
+        return False
+
+    return True
+
+
+# Backwards compatibility alias
+is_unanchored_meeting_request = is_incomplete_scheduling_request
 
 
 def pre_execution_guardrail(user_input: str) -> Tuple[bool, Optional[str]]:
     """Validate incoming user input against prompt-injection attacks and off-topic queries.
+
+    In-Domain Definition: Any utterance that mentions an action, event, meeting,
+    appointment, workout, task, errand, break, or routine—regardless of brevity or phrasing—is
+    strictly IN-DOMAIN.
+
+    Out-of-Domain Definition: Only purely irrelevant conversational topics
+    (e.g., coding assistance, factual Q&A, historical trivia, creative writing, weather)
+    qualify as OUT-OF-DOMAIN.
 
     Args:
         user_input: Raw text string provided by the user.
@@ -110,7 +362,7 @@ def pre_execution_guardrail(user_input: str) -> Tuple[bool, Optional[str]]:
                 "or alter my core instructions. How may I assist you with scheduling your tasks today?",
             )
 
-    # 2. Explicit Off-Topic Query Patterns
+    # 2. Purely Out-of-Domain Queries (coding assistance, factual Q&A, historical trivia, creative writing, weather)
     for ot_pattern in OFF_TOPIC_INTENT_PATTERNS:
         if re.search(ot_pattern, lower_input, re.IGNORECASE):
             return (
@@ -119,24 +371,7 @@ def pre_execution_guardrail(user_input: str) -> Tuple[bool, Optional[str]]:
                 "Please provide your to-do items, time commitments, or desired schedule to proceed.",
             )
 
-    # 3. Confirmation and Affirmation Whitelist
-    confirmation_phrases = ["yes", "save it", "approve", "confirmed", "looks good", "save", "ok", "okay", "go ahead", "proceed"]
-    if any(lower_input == p or lower_input.startswith(f"{p} ") or lower_input.startswith(f"{p},") for p in confirmation_phrases):
-        return (True, None)
-
-    # 4. Core Domain Keyword Word-Boundary Matches
-    has_domain_term = any(re.search(term, lower_input, re.IGNORECASE) for term in CORE_DOMAIN_TERMS)
-
-    # 5. Temporal Pattern Matches (e.g., 9am, 10:30, 2h, 45m)
-    has_time_spec = bool(re.search(r"\b(?:\d{1,2}(?::\d{2})?\s*(?:am|pm)?|\d+\s*(?:h|m|hrs?|mins?))\b", lower_input))
-
-    if not has_domain_term and not has_time_spec:
-        return (
-            False,
-            "I specialize exclusively in task scheduling, routine design, and time management. "
-            "Please provide your to-do items, time commitments, or desired schedule to proceed.",
-        )
-
+    # 3. All other utterances—regardless of brevity or phrasing—are strictly IN-DOMAIN!
     return (True, None)
 
 

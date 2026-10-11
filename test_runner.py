@@ -120,7 +120,7 @@ def run_runner_tests() -> None:
     ]
 
     mock_client = MockLLMClient(script=scripted_steps)
-    runner = ConciergeRunner(llm_client=mock_client, max_iterations=5)
+    runner = ConciergeRunner(llm_client=mock_client)
 
     user_query = "Please schedule my morning: Draft System Architecture RFC 90m high priority between 9am and 12pm."
     final_output = runner.run(user_query)
@@ -136,18 +136,21 @@ def run_runner_tests() -> None:
     print("  [PASS] Test 1 passed: Multi-step ReAct executed and active_schedule stored in state.")
 
     # -------------------------------------------------------------
-    # TEST 2: Circuit Breaker Enforcement (max_iterations = 5)
+    # TEST 2: Circuit Breaker Enforcement (max_iterations = 10)
     # -------------------------------------------------------------
-    print("\n[TEST 2] Testing circuit breaker limit (max_iterations = 5)...")
+    print("\n[TEST 2] Testing circuit breaker limit (max_iterations = 10)...")
     infinite_client = InfiniteLoopLLMClient()
-    circuit_runner = ConciergeRunner(llm_client=infinite_client, max_iterations=5)
+    circuit_runner = ConciergeRunner(llm_client=infinite_client, max_iterations=10)
 
     circuit_result = circuit_runner.run("Keep analyzing my tasks.")
     print("\n[CIRCUIT BREAKER OUTPUT]: " + circuit_result)
 
-    assert infinite_client.call_count == 5, f"Expected 5 calls, got {infinite_client.call_count}"
-    assert "Circuit breaker tripped" in circuit_result
-    print("  [PASS] Test 2 passed: Circuit breaker tripped cleanly at iteration limit.")
+    assert infinite_client.call_count == 10, f"Expected 10 calls, got {infinite_client.call_count}"
+    assert (
+        "I've processed part of your request, but needed more steps to finalize. Would you like me to continue?"
+        in circuit_result
+    )
+    print("  [PASS] Test 2 passed: Circuit breaker tripped cleanly at iteration limit with graceful fallback.")
 
     print("\n" + "=" * 60)
     print("ALL RUNNER TESTS COMPLETED SUCCESSFULLY!")

@@ -19,6 +19,7 @@ class TaskCategory(str, Enum):
     SHALLOW_WORK = "Shallow Work"
     ERRANDS = "Errands"
     HEALTH = "Health"
+    REST = "Rest"
 
 
 class TaskPriority(str, Enum):
@@ -27,6 +28,7 @@ class TaskPriority(str, Enum):
     MEDIUM = "Medium"
     HIGH = "High"
     CRITICAL = "Critical"
+    NONE = "None"
 
 
 class TaskStatus(str, Enum):
@@ -41,7 +43,7 @@ class TaskStatus(str, Enum):
 class TaskItem(BaseModel):
     """Atomic task domain entity parsed from user inputs or routine templates."""
 
-    model_config = ConfigDict(use_enum_values=True, validate_assignment=True)
+    model_config = ConfigDict(use_enum_values=True, validate_assignment=True, extra="ignore")
 
     id: str = Field(
         default_factory=lambda: str(uuid4()),
@@ -70,6 +72,22 @@ class TaskItem(BaseModel):
     status: TaskStatus = Field(
         default=TaskStatus.PENDING,
         description="Current completion status of the task.",
+    )
+    target_start_time: Optional[str] = Field(
+        default=None,
+        description="Optional scheduled start time in HH:MM format (e.g. from relative timing or explicit slot).",
+    )
+    target_date: Optional[str] = Field(
+        default=None,
+        description="Optional scheduled calendar date in YYYY-MM-DD format.",
+    )
+    has_explicit_start: bool = Field(
+        default=False,
+        description="Whether an explicit start anchor time was specified.",
+    )
+    has_explicit_duration: bool = Field(
+        default=True,
+        description="Whether an explicit duration or end time was provided.",
     )
 
     @field_validator("title")

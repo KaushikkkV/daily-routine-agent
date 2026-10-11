@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional, Protocol
 from uuid import uuid4
 
-from agent_config import AgentConfig
+from agent_config import AgentConfig, FALLBACK_ITERATION_MESSAGE, MAX_ITERATIONS
 from guardrails import (
     GuardrailViolation,
     ScheduleValidationViolation,
@@ -38,6 +38,10 @@ class LLMResponse:
     content: Optional[str] = None
     thought: Optional[str] = None
     tool_calls: List[ToolCallRequest] = field(default_factory=list)
+    action_chips: List[str] = field(default_factory=list)
+    requires_date_selection: bool = False
+    ui_action: Optional[str] = None
+    default_task: Optional[str] = None
 
 
 class LLMClient(Protocol):
@@ -62,13 +66,18 @@ class ConciergeRunner:
         llm_client: Optional[LLMClient] = None,
         session_store: Optional[SQLiteSessionStore] = None,
         session_id: Optional[str] = None,
-        max_iterations: int = 5,
+        max_iterations: int = MAX_ITERATIONS,
         verbose: bool = False,
     ) -> None:
         self.config = config or AgentConfig.create_default()
         self.llm_client = llm_client
         self.session_store = session_store
-        self.max_iterations = max_iterations
+        chosen_iterations = (
+            self.config.max_iterations
+            if config is not None and max_iterations == MAX_ITERATIONS
+            else max_iterations
+        )
+        self.max_iterations = min(chosen_iterations, MAX_ITERATIONS)
         self.verbose = verbose or os.getenv("CONCIERGE_DEBUG", "0").lower() in ("1", "true", "yes")
 
         # 1. State initialization and session restoration
@@ -80,9 +89,18 @@ class ConciergeRunner:
         else:
             self.state = AgentState(session_id=session_id or str(uuid4()))
 
-        # 2. Reconstruct raw message history for LLM context
+        # 2. Reconstruct raw message history for LLM context with dynamic temporal anchor
+        current_local_now = datetime.now()
+        dynamic_temporal_context = (
+            f"\n\n# Current Temporal Reference\n"
+            f"- Current Local Date: {current_local_now.strftime('%Y-%m-%d')}\n"
+            f"- Current Local Time: {current_local_now.strftime('%H:%M')} (24-hour format)\n"
+            f"- Current Day of Week: {current_local_now.strftime('%A')}\n"
+        )
+        full_system_prompt = self.config.system_prompt + dynamic_temporal_context
+
         self._raw_messages: List[Dict[str, Any]] = [
-            {"role": "system", "content": self.config.system_prompt}
+            {"role": "system", "content": full_system_prompt}
         ]
         for msg in self.state.message_history:
             self._raw_messages.append({"role": msg.role, "content": msg.content})
@@ -104,6 +122,16 @@ class ConciergeRunner:
         Returns:
             The final assistant response text string.
         """
+        # Refresh dynamic temporal context in system message
+        current_local_now = datetime.now()
+        dynamic_temporal_context = (
+            f"\n\n# Current Temporal Reference\n"
+            f"- Current Local Date: {current_local_now.strftime('%Y-%m-%d')}\n"
+            f"- Current Local Time: {current_local_now.strftime('%H:%M')} (24-hour format)\n"
+            f"- Current Day of Week: {current_local_now.strftime('%A')}\n"
+        )
+        if self._raw_messages and self._raw_messages[0]["role"] == "system":
+            self._raw_messages[0]["content"] = self.config.system_prompt + dynamic_temporal_context
         # 1. Pre-Execution Guardrail (Injection and Off-Topic Check)
         is_valid, redirect_text = pre_execution_guardrail(user_input)
         if not is_valid:
@@ -128,11 +156,13 @@ class ConciergeRunner:
         )
         self._raw_messages.append({"role": "user", "content": user_input})
 
+        step = 0
         iteration = 0
         tool_schemas = self.config.tool_registry.get_all_schemas()
 
-        while iteration < self.max_iterations:
-            iteration += 1
+        while step < self.max_iterations:
+            step += 1
+            iteration = step
 
             # Check if LLM client is configured
             if not self.llm_client:
@@ -255,11 +285,11 @@ class ConciergeRunner:
                 )
 
         # 6. Circuit Breaker Fallback
-        circuit_msg = (
-            f"Circuit breaker tripped: reached maximum allowed iterations ({self.max_iterations}) "
-            "without completing the turn. Halting execution to prevent runaway loop."
+        circuit_msg = FALLBACK_ITERATION_MESSAGE
+        print(
+            f"[CIRCUIT_BREAKER] Reached maximum allowed iterations ({self.max_iterations}). "
+            f"Fallback returned: {circuit_msg}"
         )
-        print(f"[CIRCUIT_BREAKER] {circuit_msg}")
         self._raw_messages.append({"role": "assistant", "content": circuit_msg})
         self.state.message_history.append(
             ChatMessage(

@@ -6,12 +6,14 @@ import { Brain, ChevronDown, Sparkles, Terminal } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 interface ThoughtAccordionProps {
+  id?: string;
   thought?: string | null;
   className?: string;
   defaultOpen?: boolean;
 }
 
 export const ThoughtAccordion: React.FC<ThoughtAccordionProps> = ({
+  id,
   thought,
   className = "",
   defaultOpen = false,
@@ -30,6 +32,7 @@ export const ThoughtAccordion: React.FC<ThoughtAccordionProps> = ({
 
   return (
     <div
+      id={id}
       className={cn(
         "my-2.5 overflow-hidden rounded-xl border border-indigo-900/40 bg-zinc-950/80 shadow-sm transition-all duration-200",
         isOpen && "border-indigo-500/40 ring-1 ring-indigo-500/20",
